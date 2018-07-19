@@ -16,7 +16,8 @@ from tensorflow.keras.layers import Reshape
 from tensorflow.keras.layers import UpSampling2D
 from tensorflow.keras.layers import ZeroPadding2D
 from tensorflow.keras.models import Model
-from tensorflow.keras.models import model_from_json
+from tensorflow.keras.models import load_model
+from tensorflow.keras.callbacks import ModelCheckpoint
 
 import tensorflow.keras.backend as K
 
@@ -26,11 +27,48 @@ from Mylayers import MaxPoolingWithArgmax2D
 from Mylayers import MaxUnpooling2D
 from generator import data_gen
 
+from datetime import datetime
 import argparse
 import json
 import numpy as np
 import os
+import sys
 import pickle
+
+
+# [Recipe 577058](https://code.activestate.com/recipes/577058/) adopted for Python 3
+def query_yes_no(question, default="yes"):
+    """Ask a yes/no question via raw_input() and return their answer.
+    
+    "question" is a string that is presented to the user.
+    "default" is the presumed answer if the user just hits <Enter>.
+        It must be "yes" (the default), "no" or None (meaning
+        an answer is required of the user).
+
+    The "answer" return value is one of "yes" or "no".
+    """
+    valid = {"yes":"yes",   "y":"yes",  "ye":"yes",
+             "no":"no",     "n":"no"}
+    if default == None:
+        prompt = " [y/n] "
+    elif default == "yes":
+        prompt = " [Y/n] "
+    elif default == "no":
+        prompt = " [y/N] "
+    else:
+        raise ValueError("invalid default answer: '%s'" % default)
+
+    while 1:
+        sys.stdout.write(question + prompt)
+        choice = input().lower()
+        if default is not None and choice == '':
+            return default
+        elif choice in valid.keys():
+            return valid[choice]
+        else:
+            sys.stdout.write("Please respond with 'yes' or 'no' "\
+                             "(or 'y' or 'n').\n")
+
 
 def CreateSegNet(input_shape, kernel=3, pool_size=(2, 2), output_mode="sigmoid", inputz=None):
     # encoder
@@ -112,6 +150,8 @@ def SegNetEncoderDecoderGenerator(inputs, layers, kernel=3, pool_size=(2, 2), sh
     print("Building decoder done..")
 
 def main(args):
+    auto_checkpoint_name = 'auto-checkpoint'
+    end_checkpoint_name = 'end_checkpoint'
     train_gen = data_gen(args.data_dir, args.batch_size,
                          timestamp_range=(0.0, 0.8), range_in_fractions=True,
                          img_resolution=args.input_shape)
@@ -119,42 +159,59 @@ def main(args):
                          timestamp_range=(0.8, 1.0), range_in_fractions=True,
                          img_resolution=args.input_shape)
 
+    checkpoint = None
     if args.continue_training:
         # Load model and weights
-        print("Loading Data From saved weights")
-        model_dir = os.path.join('pretrained')
-        with open(os.path.join(model_dir, 'LIP_SegNet.json'), 'r') as model_json:
-            custom_layers = {'MaxPoolingWithArgmax2D': MaxPoolingWithArgmax2D,
-                             'MaxUnpooling2D': MaxUnpooling2D}
-            segnet = model_from_json(model_json.read(), custom_layers)
-            segnet.load_weights(os.path.join(model_dir, 'LIP_SegNet10.hdf5'))
-    else:
+        if not os.path.isfile(end_checkpoint_name):
+            if os.path.isfile(auto_checkpoint_name):
+                print('Training didn\'t terminate - loading last mid-training checkpoint...')
+                checkpoint = auto_checkpoint_name
+            else:
+                print('No available checkpoints - training from scratch')
+        elif os.stat(auto_checkpoint_name).st_mtime > os.stat(end_checkpoint_name).st_mtime:
+            print('Available final checkpoint is older than a present mid-training checkpoint.')
+            if query_yes_no('Use the newer checkpoint?'):
+                checkpoint = auto_checkpoint_name
+            else:
+                checkpoint = end_checkpoint_name
+        else:
+            checkpoint = end_checkpoint_name
+    
+    if checkpoint is None:
         #  Create fresh model
         segnet = CreateSegNet(args.input_shape, args.kernel, args.pool_size, args.output_mode)
+    else:
+        custom_layers = {'MaxPoolingWithArgmax2D': MaxPoolingWithArgmax2D,
+                         'MaxUnpooling2D': MaxUnpooling2D}
+        segnet = load_model(checkpoint, custom_objects=custom_layers, compile=False)
     
+    segnet.compile(loss=args.loss, optimizer=args.optimizer, metrics=["mean_squared_error"])
     print(segnet.summary())
 
-    segnet.compile(loss=args.loss, optimizer=args.optimizer, metrics=["mean_squared_error"])
 
     # Use below to run CPU-only session
     # config = tf.ConfigProto(device_count={'GPU': 0})
     # sess = tf.Session(config=config)
 
     # Use below to run with the tensorflow debugger
-    # sess = K.get_session()
+    sess = K.get_session()
     # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
     # K.set_session(sess)
 
     print("About to train")
-    history = segnet.fit_generator(train_gen, steps_per_epoch=args.epoch_steps, epochs=args.n_epochs, validation_data=val_gen, validation_steps=args.val_steps)
+    checkpoint_cb = ModelCheckpoint(auto_checkpoint_name, monitor='val_loss', verbose=1, save_best_only=False, mode='min')
+    history = segnet.fit_generator(train_gen,
+                                   steps_per_epoch=args.epoch_steps,
+                                   epochs=args.n_epochs,
+                                   validation_data=val_gen,
+                                   validation_steps=args.val_steps,
+                                   callbacks=[checkpoint_cb])
 
     pickle.dump(history.history, open(r'history.pickle', 'wb'))
 
-    segnet.save_weights("pretrained/LIP_SegNet"+str(args.n_epochs)+".hdf5")
-    print("sava weight done..")
+    segnet.save(end_checkpoint_name)
 
-    json_string = segnet.to_json()
-    open("pretrained/LIP_SegNet.json", "w").write(json_string)
+    sess.close()
 
 
 if __name__ == "__main__":
