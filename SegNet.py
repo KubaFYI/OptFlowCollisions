@@ -1,27 +1,36 @@
 # -*- coding: utf-8 -*-
 import tensorflow as tf
-from tensorflow.keras.models import Model, model_from_json
-from tensorflow.keras.layers import Input
-from tensorflow.keras.layers import Dense, Dropout, Activation, Flatten, Reshape, Permute
-from tensorflow.keras.layers import Convolution2D, MaxPooling2D, UpSampling2D, ZeroPadding2D
+
+from tensorflow.keras.layers import Activation
 from tensorflow.keras.layers import BatchNormalization
-from tensorflow.keras.layers import Multiply, Concatenate
+from tensorflow.keras.layers import Concatenate
+from tensorflow.keras.layers import Convolution2D
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Dropout
+from tensorflow.keras.layers import Flatten
+from tensorflow.keras.layers import Input
+from tensorflow.keras.layers import MaxPooling2D
+from tensorflow.keras.layers import Multiply
+from tensorflow.keras.layers import Permute
+from tensorflow.keras.layers import Reshape
+from tensorflow.keras.layers import UpSampling2D
+from tensorflow.keras.layers import ZeroPadding2D
+from tensorflow.keras.models import Model
+from tensorflow.keras.models import model_from_json
 
 import tensorflow.keras.backend as K
+
 from tensorflow.python import debug as tf_debug
 
-from Mylayers import MaxPoolingWithArgmax2D, MaxUnpooling2D
+from Mylayers import MaxPoolingWithArgmax2D
+from Mylayers import MaxUnpooling2D
 from generator import data_gen
 
-import os
-import numpy as np
 import argparse
 import json
-import pandas as pd
-from PIL import Image
+import numpy as np
+import os
 import pickle
-import pdb
-
 
 def CreateSegNet(input_shape, kernel=3, pool_size=(2, 2), output_mode="sigmoid", inputz=None):
     # encoder
@@ -140,7 +149,6 @@ def main(args):
     history = segnet.fit_generator(train_gen, steps_per_epoch=args.epoch_steps, epochs=args.n_epochs, validation_data=val_gen, validation_steps=args.val_steps)
 
     pickle.dump(history.history, open(r'history.pickle', 'wb'))
-
 
     segnet.save_weights("pretrained/LIP_SegNet"+str(args.n_epochs)+".hdf5")
     print("sava weight done..")
