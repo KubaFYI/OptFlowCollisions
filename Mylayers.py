@@ -72,3 +72,43 @@ class MaxUnpooling2D(Layer):
     def compute_output_shape(self, input_shape):
         mask_shape = input_shape[1]
         return mask_shape[0], mask_shape[1] * self.size[0], mask_shape[2] * self.size[1], mask_shape[3]
+
+
+class CombineMotionWithImg(Layer):
+    '''
+    Combines upsampled velocity vector with a grid of pixel positions scaled to
+    match the size of image input.
+    '''
+    def __init__(self, **kwargs):
+        super(CombineMotionWithImg, self).__init__(**kwargs)
+
+    def call(self, inputs, output_shape=None):
+        with tf.variable_scope(self.name):
+            # Create a 2D array of x and y coordinates of each pixel, with the centre
+            # of the image being (0,0)
+            input_shape = tf.shape(inputs)
+            input_shape_fl = tf.cast(input_shape, tf.float32)
+
+
+            width = input_shape_fl[-3]
+            height = input_shape_fl[-2]
+            xs = tf.range(width, dtype=tf.float32)
+            xs = tf.floor(tf.subtract(xs, width))
+            ys = tf.range(height, dtype=tf.float32)
+            ys = tf.floor(tf.subtract(ys, height))
+            xs, ys = tf.meshgrid(ys, xs)
+            xs = tf.expand_dims(xs, axis=-1)
+            ys = tf.expand_dims(ys, axis=-1)
+            xy_grid = tf.concat([xs, ys], axis=-1)
+        
+            xy_grid = tf.expand_dims(xy_grid, axis=0)
+            batch_size = input_shape[0:1]
+            batch_size = tf.concat([batch_size, tf.ones((3,), dtype=tf.int32)], axis=0)
+            xy_grid = tf.tile(xy_grid, batch_size)
+            
+            pos_vel_pre_input = tf.concat([inputs, xy_grid], axis=-1)
+
+            return pos_vel_pre_input
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[-3], input_shape[-2], input_shape[-1]

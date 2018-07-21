@@ -25,6 +25,7 @@ from tensorflow.python import debug as tf_debug
 
 from Mylayers import MaxPoolingWithArgmax2D
 from Mylayers import MaxUnpooling2D
+from Mylayers import CombineMotionWithImg
 from generator import data_gen
 
 from datetime import datetime
@@ -70,31 +71,41 @@ def query_yes_no(question, default="yes"):
                              "(or 'y' or 'n').\n")
 
 
-def CreateSegNet(input_shape, kernel=3, pool_size=(2, 2), output_mode="sigmoid", inputz=None):
+def CreateSegNet(input_shapes, kernel=3, pool_size=(2, 2), output_mode="sigmoid"):
     # encoder
     K.set_image_data_format('channels_last')
+    input_optical_flow = Input(shape=(input_shapes[0][1], input_shapes[0][0], input_shapes[0][2]), name='input_optical_flow')
+    input_motion = Input(shape=input_shapes[1], name='input_motion')
 
-    if inputz is None:
-        inputs = Input(shape=(input_shape[1], input_shape[0], input_shape[2]))
-    else:
-        inputs = tf.stack(inputz[0])
+    # Tile the motion vector to match the size of image inputs
+    input_motion_2d = UpSampling2D(size=(input_shapes[0][1], input_shapes[0][0]))(input_motion)
+    
+    pos_vel_pre = CombineMotionWithImg()(input_motion_2d)
 
-    layers = [(2, 64), (2, 128), (3, 256), (3, 512)]
-    enc_dec, masks = SegNetEncoderDecoderGenerator(inputs, layers=layers,
-                                kernel=3, pool_size=(2, 2),
+    pos_vel_pre = Convolution2D(3*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
+    pos_vel_pre = Convolution2D(2*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
+    pos_vel_pre = Convolution2D((input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
+
+
+    full_input = Concatenate(axis=-1)([input_optical_flow, pos_vel_pre])
+
+    encoder_decoder_layers = [(2, 64, 5), (2, 64, 5)]
+    enc_dec, masks = SegNetEncoderDecoderGenerator(full_input,
+                                layers=encoder_decoder_layers,
+                                pool_size=(2, 2),
                                 shave_off_decoder_end=1)
 
-    conv_26 = Convolution2D(1, (1, 1), padding="same")(enc_dec)
+    conv_26 = Convolution2D(1, (1, 1), padding="same", activation='relu')(enc_dec)
     outputs = BatchNormalization()(conv_26)
 
     # For some reason the final activation sets all tensor elements to 1.0 -- why??
     # outputs = Activation(output_mode)(outputs)
 
-    segnet = Model(inputs=inputs, outputs=outputs, name="OFNet")
+    segnet = Model(inputs=[input_optical_flow, input_motion], outputs=outputs, name="OFNet")
 
     return segnet
 
-def SegNetEncoderDecoderGenerator(inputs, layers, kernel=3, pool_size=(2, 2), shave_off_decoder_end=0):
+def SegNetEncoderDecoderGenerator(inputs, layers, pool_size=(2, 2), shave_off_decoder_end=0):
     '''
     Creates an convolutional symmetric encoder-decoder architecture similar to
     that of a SegNet. The exact structure is defined by the 'layers' argument
@@ -111,6 +122,7 @@ def SegNetEncoderDecoderGenerator(inputs, layers, kernel=3, pool_size=(2, 2), sh
     for idx, group in enumerate(layers):
         layers_no = group[0]
         width = group[1]
+        kernel = group[2]
         for i in range(layers_no):
             io = Convolution2D(width, (kernel, kernel), padding="same")(io)
             io = BatchNormalization()(io)
@@ -129,6 +141,7 @@ def SegNetEncoderDecoderGenerator(inputs, layers, kernel=3, pool_size=(2, 2), sh
     for idx, group in enumerate(reversed(layers)):
         layers_no = group[0]
         width = group[1]
+        kernel = group[2]
 
         io = MaxUnpooling2D(pool_size)([io, masks[-1-idx]])
 
@@ -154,10 +167,13 @@ def main(args):
     end_checkpoint_name = 'end_checkpoint'
     train_gen = data_gen(args.data_dir, args.batch_size,
                          timestamp_range=(0.0, 0.8), range_in_fractions=True,
-                         img_resolution=args.input_shape)
+                         img_resolution=args.input_shape, min_max_value=0.1,
+                         include_motion_data=True)
     val_gen = data_gen(args.data_dir, args.batch_size,
                          timestamp_range=(0.8, 1.0), range_in_fractions=True,
-                         img_resolution=args.input_shape)
+                         img_resolution=args.input_shape, min_max_value=0.1,
+                         include_motion_data=True)
+    motion_data_size = (1, 1, 3)
 
     checkpoint = None
     if args.continue_training:
@@ -179,7 +195,7 @@ def main(args):
     
     if checkpoint is None:
         #  Create fresh model
-        segnet = CreateSegNet(args.input_shape, args.kernel, args.pool_size, args.output_mode)
+        segnet = CreateSegNet([args.input_shape, motion_data_size], args.kernel, args.pool_size, args.output_mode)
     else:
         custom_layers = {'MaxPoolingWithArgmax2D': MaxPoolingWithArgmax2D,
                          'MaxUnpooling2D': MaxUnpooling2D}
@@ -216,7 +232,6 @@ def main(args):
 
 if __name__ == "__main__":
     # command line argments
-    training_data_loc = '/home/kubafyi/Code/SegNet-Tutorial/CamVid'
     parser = argparse.ArgumentParser(description="SegNet LIP dataset")
     parser.add_argument("--data_dir",
             default=os.path.join('/mnt', 'data', 'AirSimCollectedData', 'testing'), help="Training / validation / testing data location")
