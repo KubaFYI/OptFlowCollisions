@@ -10,11 +10,18 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 from pyquaternion import Quaternion
 import pickle
-
+from flowlib import flow_to_image
+# cv2.imshow('qwe', flow_to_image(opt_flow))
 
 default_data_dir = os.path.join('/mnt', 'data', 'AirSimCollectedData', 'testing')
 csv_col_names = ['LV_x', 'LV_y', 'LV_z', 'AV_x', 'AV_y', 'AV_z', 'OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']
 datapoints_csv_name = os.path.join(default_data_dir, 'airsim_rec.csv')
+
+default_bins = [0, 0.1, 0.25, 0.5, 0.75, 0.9]
+
+# For some reason max values for collision distance seem to be bounded at 0.5
+# This multiplier aims to fix that
+coll_dist_mul = 2
 
 def world2camera_coords(vect, cam_orient):
     '''
@@ -56,6 +63,7 @@ def load_optical_flow_metadata(data_dir, datapoints):
             coll_dist_n = os.path.join(data_dir, 'images',
                                       'misc_' + str(timestamp) + '.npz')
             coll_dist = np.load(coll_dist_n)['arr_0']
+            coll_dist *= coll_dist_mul  # not sure why the max value seems to be bounded at 0.5...
             metadata['sums'].append(np.sum(coll_dist))
             metadata['max_vals'].append(np.max(coll_dist))
             orient.append(Quaternion(datapoints.loc[timestamp][['OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']]))
@@ -71,7 +79,7 @@ def load_optical_flow_metadata(data_dir, datapoints):
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
     return metadata
 
-def data_gen(data_dir, batch_size,
+def data_gen(data_dir, batch_size, bins=None,
              timestamp_range=None, range_in_fractions=False,
              img_resolution=None,
              random_order=True,
@@ -113,6 +121,7 @@ def data_gen(data_dir, batch_size,
     print('Using dataset with of {} elements'.format(datapoints.shape[0]))
     batch_start = start_idx
     while True:
+        timestamps = []
         inputs = []
         vel_inputs = []
         labels = []
@@ -135,6 +144,7 @@ def data_gen(data_dir, batch_size,
             coll_dist_n = os.path.join(data_dir, 'images',
                                       'misc_' + str(datapoints.index[i]) + '.npz')
             coll_dist = np.load(coll_dist_n)['arr_0']
+            coll_dist *= coll_dist_mul  # not sure why the max value seems to be bounded at 0.5...
 
             if include_rgb:
                 rgb_n = os.path.join(data_dir, 'images',
@@ -143,25 +153,51 @@ def data_gen(data_dir, batch_size,
                 rgbs.append(rgb)
 
             if img_resolution is not None:
-                opt_flow = cv2.resize(opt_flow, img_resolution[:2])
+                opt_flow = cv2.resize(opt_flow, (img_resolution[1], img_resolution[0]))
+                # print(opt_flow.shape)
+            timestamps.append(datapoints.index[i])
             inputs.append(opt_flow)
-            labels.append(np.expand_dims(coll_dist, axis=0).T)
-            vel_inputs.append(metadata['camera_vel'][i])
+            labels.append(np.expand_dims(coll_dist, axis=-1))
+            # print('cd:{}'.format(coll_dist.shape))
+            if include_motion_data:
+                vel_inputs.append(metadata['camera_vel'][i])
+        timestamps = np.array(timestamps)
         inputs = np.array(inputs)
-        vel_inputs = np.array(vel_inputs)
-        # Turn motion vectors into motion 1x1 'images' with vector values as 'channels'
-        vel_inputs = np.expand_dims(np.expand_dims(vel_inputs, axis=1), axis=1)
+        if include_motion_data:
+            vel_inputs = np.array(vel_inputs)
+            # Turn motion vectors into motion 1x1 'images' with vector values as 'channels'
+            vel_inputs = np.expand_dims(np.expand_dims(vel_inputs, axis=1), axis=1)
+            inputs = [inputs, vel_inputs]
         labels = np.array(labels)
         if include_rgb:
             rgbs = np.array(rgbs)
-            yield inputs, labels, rgbs
+            yield inputs, bin_pixels(labels, bins), rgbs, timestamps
         elif include_motion_data:
-            yield [inputs, vel_inputs], labels
+            yield inputs, bin_pixels(labels, bins)
         else:
-            yield inputs, labels
+            yield inputs, bin_pixels(labels, bins)
 
+def bin_pixels(data, bins):
+    '''
+    Bins the values of 1-channel pixel data into N pre-defined buckets, and
+    returns on-hot-encoded N-channel array corresponding to the result.
+    '''
+    if bins is None:
+        return data
+    bin_indices = np.digitize(data, bins) - 1
+    result = np.zeros((data.shape[0], data.shape[1], data.shape[2], len(bins)))
+    
+    for bin_idx in range(len(bins)):
+        one_hot_indices = np.nonzero(bin_indices==bin_idx)
+        one_hot_indices = (one_hot_indices[0],
+                           one_hot_indices[1],
+                           one_hot_indices[2],
+                           bin_idx * np.ones_like(one_hot_indices[0]))
+        result[one_hot_indices] = 1
+    # print('r{}'.format(result.shape))
+    return result
 
-def data_stats(data_dir, number_for_analysis=None):
+def data_stats(data_dir, bins, number_for_analysis=None):
     datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
     datapoints = pd.read_csv(datapoints_csv_name,
                              header=None,
@@ -179,16 +215,27 @@ def data_stats(data_dir, number_for_analysis=None):
     single_std_devs = []
     single_sums = []
 
+    binned_sums = {}
+    for bin_idx in range(len(bins)):
+        binned_sums[bin_idx] = 0
+
     for i in tqdm(ix):
         coll_dist_n = os.path.join(data_dir, 'images',
                                   'misc_' + str(datapoints.index[i]) + '.npz')
         coll_dist = np.load(coll_dist_n)['arr_0']
+        coll_dist *= 2
 
         single_maxs.append(np.max(coll_dist))
         single_mins.append(np.min(coll_dist))
         single_means.append(np.mean(coll_dist))
         single_std_devs.append(np.std(coll_dist))
         single_sums.append(np.sum(coll_dist))
+
+        bin_indices = np.digitize(coll_dist, bins) - 1
+
+        for bin_idx in range(len(bins)):
+            binned_sums[bin_idx] += np.sum(bin_indices==bin_idx)
+
 
     single_maxs = np.array(single_maxs)
     single_mins = np.array(single_mins)
@@ -217,12 +264,16 @@ def data_stats(data_dir, number_for_analysis=None):
                                  np.min(single_sums),
                                  np.mean(single_sums),
                                  np.median(single_sums)))
+
+    for bin_idx in range(len(bins)):
+        print('#{} bin: {}'.format(bin_idx, binned_sums[bin_idx]))
+
     perc = 70
     prec_sum = np.percentile(single_sums, perc)
     sums = single_sums[single_sums>prec_sum]
     print('showing sums bigger than {} ({} of them)'.format(prec_sum, np.size(sums)))
-    plt.hist(sums, bins=40)
-    plt.show()
+    # plt.hist(sums, bins=40)
+    # plt.show()
 
 if __name__ == '__main__':
-    data_stats(default_data_dir)
+    data_stats(default_data_dir, default_bins)

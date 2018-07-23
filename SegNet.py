@@ -26,7 +26,7 @@ from tensorflow.python import debug as tf_debug
 from Mylayers import MaxPoolingWithArgmax2D
 from Mylayers import MaxUnpooling2D
 from Mylayers import CombineMotionWithImg
-from generator import data_gen
+from generator import data_gen, default_bins
 
 from datetime import datetime
 import argparse
@@ -71,35 +71,36 @@ def query_yes_no(question, default="yes"):
                              "(or 'y' or 'n').\n")
 
 
-def CreateSegNet(input_shapes, kernel=3, pool_size=(2, 2), output_mode="sigmoid"):
+def CreateSegNet(input_shapes, kernel=3, pool_size=(2, 2), output_mode="softmax", nlabels=1):
     # encoder
     K.set_image_data_format('channels_last')
-    input_optical_flow = Input(shape=(input_shapes[0][1], input_shapes[0][0], input_shapes[0][2]), name='input_optical_flow')
+    input_optical_flow = Input(shape=input_shapes[0], name='input_optical_flow')
     input_motion = Input(shape=input_shapes[1], name='input_motion')
 
     # Tile the motion vector to match the size of image inputs
-    input_motion_2d = UpSampling2D(size=(input_shapes[0][1], input_shapes[0][0]))(input_motion)
+    input_motion_2d = UpSampling2D(size=input_shapes[0][:2])(input_motion)
     
     pos_vel_pre = CombineMotionWithImg()(input_motion_2d)
 
-    pos_vel_pre = Convolution2D(3*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
+    pos_vel_pre = Convolution2D(2*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
+    pos_vel_pre = Convolution2D(4*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
     pos_vel_pre = Convolution2D(2*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
     pos_vel_pre = Convolution2D((input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
 
 
     full_input = Concatenate(axis=-1)([input_optical_flow, pos_vel_pre])
 
-    encoder_decoder_layers = [(2, 64, 5), (2, 64, 5)]
+    encoder_decoder_layers = [(2, 32, 5), (3, 64, 5)]
     enc_dec, masks = SegNetEncoderDecoderGenerator(full_input,
                                 layers=encoder_decoder_layers,
                                 pool_size=(2, 2),
                                 shave_off_decoder_end=1)
 
-    conv_26 = Convolution2D(1, (1, 1), padding="same", activation='relu')(enc_dec)
+    conv_26 = Convolution2D(nlabels, (1, 1), padding="same")(enc_dec)
     outputs = BatchNormalization()(conv_26)
 
     # For some reason the final activation sets all tensor elements to 1.0 -- why??
-    # outputs = Activation(output_mode)(outputs)
+    outputs = Activation(output_mode)(outputs)
 
     segnet = Model(inputs=[input_optical_flow, input_motion], outputs=outputs, name="OFNet")
 
@@ -165,14 +166,17 @@ def SegNetEncoderDecoderGenerator(inputs, layers, pool_size=(2, 2), shave_off_de
 def main(args):
     auto_checkpoint_name = 'auto-checkpoint'
     end_checkpoint_name = 'end_checkpoint'
+    bins = default_bins
     train_gen = data_gen(args.data_dir, args.batch_size,
-                         timestamp_range=(0.0, 0.8), range_in_fractions=True,
+                         timestamp_range=(0.0, 0.9), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
-                         include_motion_data=True)
+                         include_motion_data=True,
+                         bins=bins)
     val_gen = data_gen(args.data_dir, args.batch_size,
-                         timestamp_range=(0.8, 1.0), range_in_fractions=True,
+                         timestamp_range=(0.9, 1.0), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
-                         include_motion_data=True)
+                         include_motion_data=True,
+                         bins=bins)
     motion_data_size = (1, 1, 3)
 
     checkpoint = None
@@ -195,13 +199,14 @@ def main(args):
     
     if checkpoint is None:
         #  Create fresh model
-        segnet = CreateSegNet([args.input_shape, motion_data_size], args.kernel, args.pool_size, args.output_mode)
+        segnet = CreateSegNet([args.input_shape, motion_data_size], args.kernel, args.pool_size, args.output_mode, nlabels=len(bins))
     else:
         custom_layers = {'MaxPoolingWithArgmax2D': MaxPoolingWithArgmax2D,
-                         'MaxUnpooling2D': MaxUnpooling2D}
+                         'MaxUnpooling2D': MaxUnpooling2D,
+                         'CombineMotionWithImg': CombineMotionWithImg}
         segnet = load_model(checkpoint, custom_objects=custom_layers, compile=False)
     
-    segnet.compile(loss=args.loss, optimizer=args.optimizer, metrics=["mean_squared_error"])
+    segnet.compile(loss=args.loss, optimizer=args.optimizer, metrics=["categorical_crossentropy"])
     print(segnet.summary())
 
 
@@ -270,7 +275,7 @@ if __name__ == "__main__":
             type=str,
             help="output activation")
     parser.add_argument("--loss",
-            default="mean_squared_error",
+            default="categorical_crossentropy",
             type=str,
             help="loss function")
     parser.add_argument("--optimizer",
