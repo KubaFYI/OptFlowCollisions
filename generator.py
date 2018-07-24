@@ -5,7 +5,7 @@ import pandas as pd
 import cv2
 import csv
 from tensorflow.keras.preprocessing.image import array_to_img, img_to_array, load_img, ImageDataGenerator
-from scipy.misc import imresize
+from scipy.optimize import minimize
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 from pyquaternion import Quaternion
@@ -22,6 +22,54 @@ default_bins = [0, 0.1, 0.25, 0.5, 0.75, 0.9]
 # For some reason max values for collision distance seem to be bounded at 0.5
 # This multiplier aims to fix that
 coll_dist_mul = 2
+
+# https://github.com/unrealcv/unrealcv/issues/14
+orig_image_size = (270, 480)    # (h,w)
+FOV = 90    # in degeres
+cam_f = orig_image_size[1] / 2 / np.tan( FOV / 180 * np.pi / 2 )
+
+cam_f = 4.51841102e+00 # calculated by minimization of horizontal flow in a yaw-only dataset
+xy_scale_default = 4.26735713e-07
+
+def o_f_compensate_for_rotation(opt_flow, rot, focal=cam_f, xy_scaling=xy_scale_default):
+    '''
+    Removes estimated optical flow due to camera rotation.
+    '''
+    # Calculate OF due to rotation
+    # http://scholarpedia.org/article/Optic_flow#Optic_flow_for_guidance_of_locomotion_and_scene_parsing
+    # return opt_flow
+    opt_flow_corrected = np.copy(opt_flow)
+    current_size = opt_flow.shape[-3:-1]
+
+    # Prepare a grid of equivalent pixel positions of original size image
+    ys = np.expand_dims(np.linspace(-orig_image_size[0]/2, orig_image_size[0]/2, num=current_size[0]), axis=-1)
+    xs = np.expand_dims(np.linspace(-orig_image_size[1]/2, orig_image_size[1]/2, num=current_size[1]), axis=0)
+    ys = np.tile(ys, (1, current_size[1]))
+    ys *= xy_scaling
+    xs = np.tile(xs, (current_size[0], 1))
+    xs *= xy_scaling
+
+    # import pdb; pdb.set_trace()
+
+    # In AirSim Coordinates rot[0] is rotation around the central axis (roll)
+    # rot[1] is pitch and rot[2] is negative yaw
+
+    # First channel is the horizontal motion component
+    # print('{}\t{}\t{}'.format(rot[1], rot[2], rot[0]))
+    opt_flow_corrected[..., 0] -= ys * xs * -rot[1]
+    opt_flow_corrected[..., 0] -= -(focal * focal + xs * xs) * -rot[2]
+    opt_flow_corrected[..., 0] -= ys * focal * rot[0]
+    # Second channel is the vertical motion component
+    opt_flow_corrected[..., 1] -= (focal * focal + ys * ys) * -rot[1]
+    opt_flow_corrected[..., 1] -= - ys * xs * -rot[2]
+    opt_flow_corrected[..., 1] -= - xs * focal * rot[0]
+
+    opt_flow_corrected /= focal
+
+    return opt_flow_corrected
+
+
+
 
 def world2camera_coords(vect, cam_orient):
     '''
@@ -55,7 +103,8 @@ def load_optical_flow_metadata(data_dir, datapoints):
         metadata = {}
         metadata['sums'] = []
         metadata['max_vals'] = []
-        metadata['camera_vel'] = []
+        metadata['cam_lin_vel'] = []
+        metadata['cam_ang_vel'] = []
         vel = []
         orient = []
         for timestamp in tqdm(datapoints.index):
@@ -67,13 +116,15 @@ def load_optical_flow_metadata(data_dir, datapoints):
             metadata['sums'].append(np.sum(coll_dist))
             metadata['max_vals'].append(np.max(coll_dist))
             orient.append(Quaternion(datapoints.loc[timestamp][['OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']]))
+            metadata['cam_ang_vel'].append(datapoints.loc[timestamp][['AV_x', 'AV_y', 'AV_z']])
 
 
         # Calculate the velocity w.r.t. camera
         vel = np.array(datapoints[['LV_x','LV_y','LV_z']])
-        metadata['camera_vel'] = world2camera_coords(vel, orient)
+        metadata['cam_lin_vel'] = world2camera_coords(vel, orient)
         metadata['sums'] = np.array(metadata['sums'])
         metadata['max_vals'] = np.array(metadata['max_vals'])
+        metadata['cam_ang_vel'] = np.array(metadata['cam_ang_vel'])
 
         f = open(metadata_file, 'wb')
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -154,13 +205,14 @@ def data_gen(data_dir, batch_size, bins=None,
 
             if img_resolution is not None:
                 opt_flow = cv2.resize(opt_flow, (img_resolution[1], img_resolution[0]))
+                opt_flow = o_f_compensate_for_rotation(opt_flow, metadata['cam_ang_vel'][i])
                 # print(opt_flow.shape)
             timestamps.append(datapoints.index[i])
             inputs.append(opt_flow)
             labels.append(np.expand_dims(coll_dist, axis=-1))
             # print('cd:{}'.format(coll_dist.shape))
             if include_motion_data:
-                vel_inputs.append(metadata['camera_vel'][i])
+                vel_inputs.append(metadata['cam_lin_vel'][i])
         timestamps = np.array(timestamps)
         inputs = np.array(inputs)
         if include_motion_data:
@@ -275,5 +327,47 @@ def data_stats(data_dir, bins, number_for_analysis=None):
     # plt.hist(sums, bins=40)
     # plt.show()
 
+def find_focal_len(data_dir):
+    np.random.seed(777)
+    starting_estimate = [1, 1]
+    number_for_analysis = 1000
+    datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
+    datapoints = pd.read_csv(datapoints_csv_name,
+                             header=None,
+                             sep=',',
+                             names=csv_col_names,
+                             index_col=0)
+    ix = np.random.choice(np.arange(len(datapoints)), number_for_analysis)
+
+    x0 = [starting_estimate]
+    minim_args = (datapoints.iloc[ix],)
+    optimize = True
+    res = None
+    if optimize:
+        res = minimize(avg_horizontal_flow, x0, args=minim_args, method='Nelder-Mead', tol=1e-3, options={'disp': True})
+    else:
+        # vals = [100, 125, 150, 175]
+        vals = [134]
+        for val in vals:
+            print('F={} --> mean_OF:{}'.format(val, avg_horizontal_flow(val, datapoints.iloc[ix])))
+    return res
+
+def avg_horizontal_flow(inp, datapoints):
+    # import pdb; pdb.set_trace()
+    corr_opt_flow_cumul = 0
+    for i in range(len(datapoints)):
+        opt_flow_n = os.path.join(data_dir, 'images',
+                                  'flow_' + str(datapoints.index[i]) + '.npz')
+        opt_flow = np.load(opt_flow_n)['opt_flow']
+
+        corr_opt_flow_cumul += np.mean(np.abs(o_f_compensate_for_rotation(opt_flow,
+                                                datapoints.iloc[i][['AV_x', 'AV_y', 'AV_z']],
+                                                focal=inp[0], xy_scaling=inp[1])[...,0]))
+
+    corr_opt_flow_cumul /= len(datapoints)
+    return corr_opt_flow_cumul
+
 if __name__ == '__main__':
-    data_stats(default_data_dir, default_bins)
+    data_dir = os.path.join('/mnt', 'data', 'AirSimCollectedData', '18-07-23_23-05-47')
+    res = find_focal_len(data_dir)
+    print(res)
