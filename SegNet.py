@@ -84,6 +84,7 @@ def CreateSegNet(input_shapes, kernel=3, pool_size=(2, 2), output_mode="softmax"
 
     pos_vel_pre = Convolution2D(2*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
     pos_vel_pre = Convolution2D(4*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
+    pos_vel_pre = Convolution2D(4*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
     pos_vel_pre = Convolution2D(2*(input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
     pos_vel_pre = Convolution2D((input_shapes[1][-1]+2), (1, 1), padding='same', activation='relu')(pos_vel_pre)
 
@@ -167,13 +168,14 @@ def main(args):
     auto_checkpoint_name = 'auto-checkpoint'
     end_checkpoint_name = 'end_checkpoint'
     bins = default_bins
+    seed = 77
     train_gen = data_gen(args.data_dir, args.batch_size,
-                         timestamp_range=(0.0, 0.9), range_in_fractions=True,
+                         scrambled_range=(0.0, 0.9, seed), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
                          include_motion_data=True,
                          bins=bins)
     val_gen = data_gen(args.data_dir, args.batch_size,
-                         timestamp_range=(0.9, 1.0), range_in_fractions=True,
+                         scrambled_range=(0.9, 1.0, seed), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
                          include_motion_data=True,
                          bins=bins)

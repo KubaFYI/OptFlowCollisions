@@ -28,8 +28,8 @@ orig_image_size = (270, 480)    # (h,w)
 FOV = 90    # in degeres
 cam_f = orig_image_size[1] / 2 / np.tan( FOV / 180 * np.pi / 2 )
 
-cam_f = 4.51841102e+00 # calculated by minimization of horizontal flow in a yaw-only dataset
-xy_scale_default = 4.26735713e-07
+cam_f = 4.47189418e+00 # calculated by minimization of horizontal flow in a yaw-only dataset
+xy_scale_default = 4.78224949e-06
 
 def o_f_compensate_for_rotation(opt_flow, rot, focal=cam_f, xy_scaling=xy_scale_default):
     '''
@@ -38,6 +38,8 @@ def o_f_compensate_for_rotation(opt_flow, rot, focal=cam_f, xy_scaling=xy_scale_
     # Calculate OF due to rotation
     # http://scholarpedia.org/article/Optic_flow#Optic_flow_for_guidance_of_locomotion_and_scene_parsing
     # return opt_flow
+    focal = np.abs(focal)
+    xy_scaling = np.abs(xy_scaling)
     opt_flow_corrected = np.copy(opt_flow)
     current_size = opt_flow.shape[-3:-1]
 
@@ -94,7 +96,7 @@ def world2camera_coords(vect, cam_orient):
 
 def load_optical_flow_metadata(data_dir, datapoints):
     metadata_file = os.path.join(data_dir, 'optical_flow_metadata.pickle')
-    if os.path.isfile(metadata_file):
+    if os.path.isfile(metadata_file) and False:
         f = open(metadata_file, 'rb')
         metadata = pickle.load(f)
     else:
@@ -105,8 +107,10 @@ def load_optical_flow_metadata(data_dir, datapoints):
         metadata['max_vals'] = []
         metadata['cam_lin_vel'] = []
         metadata['cam_ang_vel'] = []
+        metadata['timestamp_idx'] = {}
         vel = []
         orient = []
+        idx = 0
         for timestamp in tqdm(datapoints.index):
             # Calculate sum of collision probability over pixels
             coll_dist_n = os.path.join(data_dir, 'images',
@@ -117,7 +121,8 @@ def load_optical_flow_metadata(data_dir, datapoints):
             metadata['max_vals'].append(np.max(coll_dist))
             orient.append(Quaternion(datapoints.loc[timestamp][['OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']]))
             metadata['cam_ang_vel'].append(datapoints.loc[timestamp][['AV_x', 'AV_y', 'AV_z']])
-
+            metadata['timestamp_idx'][timestamp] = idx
+            idx += 1
 
         # Calculate the velocity w.r.t. camera
         vel = np.array(datapoints[['LV_x','LV_y','LV_z']])
@@ -131,6 +136,7 @@ def load_optical_flow_metadata(data_dir, datapoints):
     return metadata
 
 def data_gen(data_dir, batch_size, bins=None,
+             scrambled_range=None,
              timestamp_range=None, range_in_fractions=False,
              img_resolution=None,
              random_order=True,
@@ -155,64 +161,69 @@ def data_gen(data_dir, batch_size, bins=None,
     elif min_max_value is not None:
         datapoints_all = datapoints_all[metadata['max_vals'] > min_max_value]
 
-    # Figure out first and last timestep of the range
-    if timestamp_range is None:
-        timestamp_range = (datapoints_all.index[0], datapoints_all.index[-1])
-
-    if range_in_fractions:
-        start_idx = int(np.floor(timestamp_range[0] * datapoints_all.shape[0]))
-        end_idx = int(np.ceil(timestamp_range[1] * datapoints_all.shape[0]))
-        start_timestamp = datapoints_all.index[start_idx]
-        end_timestamp = datapoints_all.index[end_idx-1]
+    if scrambled_range is not None:
+        datapoints = datapoints_all.sample(frac=1., random_state=scrambled_range[2])
+        datapoints = datapoints.iloc[int(scrambled_range[0] * len(datapoints)):int(scrambled_range[1] * len(datapoints))]
     else:
-        start_timestamp = timestamp_range[0]
-        end_timestamp = timestamp_range[1]
-
-    datapoints = datapoints_all.loc[start_timestamp:end_timestamp]
+        # Figure out first and last timestep of the range
+        if timestamp_range is None:
+            timestamp_range = (datapoints_all.index[0], datapoints_all.index[-1])
+    
+        if range_in_fractions:
+            start_idx = int(np.floor(timestamp_range[0] * datapoints_all.shape[0]))
+            end_idx = int(np.ceil(timestamp_range[1] * datapoints_all.shape[0]))
+            start_timestamp = datapoints_all.index[start_idx]
+            end_timestamp = datapoints_all.index[end_idx-1]
+        else:
+            start_timestamp = timestamp_range[0]
+            end_timestamp = timestamp_range[1]
+    
+        datapoints = datapoints_all.loc[start_timestamp:end_timestamp]
+        batch_start = start_idx
     print('Using dataset with of {} elements'.format(datapoints.shape[0]))
-    batch_start = start_idx
     while True:
         timestamps = []
         inputs = []
         vel_inputs = []
         labels = []
         rgbs = []
-        if random_order:
-            ix = np.random.choice(np.arange(len(datapoints)), batch_size)
+        if random_order or scrambled_range:
+            ix = datapoints.sample(n=batch_size).index
         else:
             ix = np.arange(batch_start, batch_start + batch_size)
             ix[ix>=end_idx] = start_idx + ix[ix>=end_idx] % end_idx
             batch_start += batch_size
             if batch_start >= end_idx:
                 batch_start = start_idx + batch_start % end_idx
-        for i in ix:
+        for timestamp in ix:
+            idx = metadata['timestamp_idx'][timestamp]
             # Get the optical flow input
             opt_flow_n = os.path.join(data_dir, 'images',
-                                      'flow_' + str(datapoints.index[i]) + '.npz')
+                                      'flow_' + str(timestamp) + '.npz')
             opt_flow = np.load(opt_flow_n)['opt_flow']
 
             # Get the 'collision distance' labels
             coll_dist_n = os.path.join(data_dir, 'images',
-                                      'misc_' + str(datapoints.index[i]) + '.npz')
+                                      'misc_' + str(timestamp) + '.npz')
             coll_dist = np.load(coll_dist_n)['arr_0']
             coll_dist *= coll_dist_mul  # not sure why the max value seems to be bounded at 0.5...
 
             if include_rgb:
                 rgb_n = os.path.join(data_dir, 'images',
-                                     'rgb_' + str(datapoints.index[i]) + '.png')
+                                     'rgb_' + str(timestamp) + '.png')
                 rgb = cv2.imread(rgb_n)
                 rgbs.append(rgb)
 
             if img_resolution is not None:
                 opt_flow = cv2.resize(opt_flow, (img_resolution[1], img_resolution[0]))
-                opt_flow = o_f_compensate_for_rotation(opt_flow, metadata['cam_ang_vel'][i])
+                opt_flow = o_f_compensate_for_rotation(opt_flow, metadata['cam_ang_vel'][idx])
                 # print(opt_flow.shape)
-            timestamps.append(datapoints.index[i])
+            timestamps.append(timestamp)
             inputs.append(opt_flow)
             labels.append(np.expand_dims(coll_dist, axis=-1))
             # print('cd:{}'.format(coll_dist.shape))
             if include_motion_data:
-                vel_inputs.append(metadata['cam_lin_vel'][i])
+                vel_inputs.append(metadata['cam_lin_vel'][idx])
         timestamps = np.array(timestamps)
         inputs = np.array(inputs)
         if include_motion_data:
@@ -328,9 +339,9 @@ def data_stats(data_dir, bins, number_for_analysis=None):
     # plt.show()
 
 def find_focal_len(data_dir):
-    np.random.seed(777)
-    starting_estimate = [1, 1]
-    number_for_analysis = 1000
+    np.random.seed(77)
+    starting_estimate = [100, 100]
+    number_for_analysis = 100
     datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
     datapoints = pd.read_csv(datapoints_csv_name,
                              header=None,
@@ -359,6 +370,7 @@ def avg_horizontal_flow(inp, datapoints):
         opt_flow_n = os.path.join(data_dir, 'images',
                                   'flow_' + str(datapoints.index[i]) + '.npz')
         opt_flow = np.load(opt_flow_n)['opt_flow']
+        opt_flow = cv2.resize(opt_flow, (256, 144))
 
         corr_opt_flow_cumul += np.mean(np.abs(o_f_compensate_for_rotation(opt_flow,
                                                 datapoints.iloc[i][['AV_x', 'AV_y', 'AV_z']],

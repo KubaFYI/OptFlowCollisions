@@ -104,6 +104,7 @@ def visualize_prediction(datapoint, display=True):
 
 
 if __name__ == '__main__':
+    np.random.seed(77)
     while True:
         if visualize_prediction(next(train_gen)) is None:
             break
