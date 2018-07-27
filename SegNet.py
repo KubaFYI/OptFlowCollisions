@@ -17,10 +17,9 @@ from tensorflow.keras.layers import UpSampling2D
 from tensorflow.keras.layers import ZeroPadding2D
 from tensorflow.keras.models import Model
 from tensorflow.keras.models import load_model
-from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import ModelCheckpoint, TensorBoard
 from tensorflow.keras.utils import multi_gpu_model
 from tensorflow.python.client import device_lib
-
 import tensorflow.keras.backend as K
 
 from tensorflow.python import debug as tf_debug
@@ -93,13 +92,13 @@ def CreateSegNet(input_shapes, kernel=3, pool_size=(2, 2), output_mode="softmax"
 
     full_input = Concatenate(axis=-1)([input_optical_flow, pos_vel_pre])
 
-    # encoder_decoder_layers = [(2, 32, 5), (3, 64, 5)]
-    # enc_dec, masks = SegNetEncoderDecoderGenerator(full_input,
-    #                             layers=encoder_decoder_layers,
-    #                             pool_size=(2, 2),
-    #                             shave_off_decoder_end=1)
+    encoder_decoder_layers = [(2, 32, 5), (3, 64, 5)]
+    enc_dec, masks = SegNetEncoderDecoderGenerator(full_input,
+                                layers=encoder_decoder_layers,
+                                pool_size=(2, 2),
+                                shave_off_decoder_end=1)
 
-    conv_26 = Convolution2D(nlabels, (1, 1), padding="same")(full_input)
+    conv_26 = Convolution2D(nlabels, (1, 1), padding="same")(enc_dec)
     outputs = BatchNormalization()(conv_26)
 
     # For some reason the final activation sets all tensor elements to 1.0 -- why??
@@ -172,7 +171,7 @@ def get_available_gpus():
 
 def main(args):
     auto_checkpoint_name = 'auto-checkpoint'
-    end_checkpoint_name = 'end_checkpoint'
+    end_checkpoint_name = 'end-checkpoint'
     bins = default_bins
     seed = 77
 
@@ -254,12 +253,13 @@ def main(args):
 
     print("About to train")
     checkpoint_cb = ModelCheckpoint(auto_checkpoint_name, monitor='val_loss', verbose=1, save_best_only=False, mode='min')
+    tensorboard_cb = TensorBoard(log_dir='/media/disk1/kuba/tensorboard', histogram_freq=0, write_graph=True, write_images=True)
     history = segnet_to_use.fit_generator(train_gen,
                                    steps_per_epoch=args.epoch_steps,
                                    epochs=args.n_epochs,
                                    validation_data=val_gen,
                                    validation_steps=args.val_steps,
-                                   callbacks=[checkpoint_cb])
+                                   callbacks=[checkpoint_cb, tensorboard_cb])
 
     pickle.dump(history.history, open(r'history.pickle', 'wb'))
 

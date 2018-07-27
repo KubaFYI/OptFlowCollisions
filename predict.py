@@ -35,7 +35,7 @@ custom_layers = {'MaxPoolingWithArgmax2D': MaxPoolingWithArgmax2D,
                  'MaxUnpooling2D': MaxUnpooling2D,
                  'CombineMotionWithImg': CombineMotionWithImg}
 auto_checkpoint_name = 'auto-checkpoint'
-end_checkpoint_name = 'end_checkpoint'
+end_checkpoint_name = 'end-checkpoint'
 if os.stat(end_checkpoint_name).st_mtime >= os.stat(auto_checkpoint_name).st_mtime:
     loaded_model = load_model(end_checkpoint_name, custom_objects=custom_layers)
 else:
