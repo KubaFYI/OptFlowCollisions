@@ -27,7 +27,7 @@ from tensorflow.python import debug as tf_debug
 from Mylayers import MaxPoolingWithArgmax2D
 from Mylayers import MaxUnpooling2D
 from Mylayers import CombineMotionWithImg
-from generator import data_gen, default_bins
+from generator import data_gen, default_bins, calc_class_weights
 
 from datetime import datetime
 import argparse
@@ -99,9 +99,10 @@ def CreateSegNet(input_shapes, kernel=3, pool_size=(2, 2), output_mode="softmax"
                                 shave_off_decoder_end=1)
 
     conv_26 = Convolution2D(nlabels, (1, 1), padding="same")(enc_dec)
-    outputs = BatchNormalization()(conv_26)
+    conv_26 = BatchNormalization()(conv_26)
 
     # For some reason the final activation sets all tensor elements to 1.0 -- why??
+    outputs = Reshape((input_shapes[0][0] * input_shapes[0][1], nlabels), input_shape=(input_shapes[0][0], input_shapes[0][1], nlabels))(conv_26)
     outputs = Activation(output_mode)(outputs)
 
     segnet = Model(inputs=[input_optical_flow, input_motion], outputs=outputs, name="OFNet")
@@ -165,6 +166,35 @@ def SegNetEncoderDecoderGenerator(inputs, layers, pool_size=(2, 2), shave_off_de
 
     print("Building decoder done..")
 
+def weighted_categorical_crossentropy(weights):
+    """
+    A weighted version of keras.objectives.categorical_crossentropy
+
+    (adapted from gist to work with multiclass-per-sample https://gist.github.com/wassname/ce364fddfc8a025bfab4348cf5de852d)
+    
+    Variables:
+        weights: numpy array of shape (C,) where C is the number of classes
+    
+    Usage:
+        weights = np.array([0.5,2,10]) # Class one at 0.5, class 2 twice the normal weights, class 3 10x.
+        loss = weighted_categorical_crossentropy(weights)
+        model.compile(loss=loss,optimizer='adam')
+    """
+    
+    weights = K.variable(weights)
+        
+    def loss(y_true, y_pred):
+        # scale predictions so that the class probas of each sample sum to 1
+        y_pred /= K.sum(y_pred, axis=-1, keepdims=True)
+        # clip to prevent NaN's and Inf's
+        y_pred = K.clip(y_pred, K.epsilon(), 1 - K.epsilon())
+        # calc
+        loss = y_true * K.log(y_pred) * weights
+        loss = -K.sum(loss, -1)
+        return loss
+    
+    return loss
+
 def get_available_gpus():
     local_device_protos = device_lib.list_local_devices()
     return [x.name for x in local_device_protos if x.device_type == 'GPU']
@@ -188,14 +218,12 @@ def main(args):
                          scrambled_range=(0.0, 0.9, seed), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
                          include_motion_data=True,
-                         bins=bins,
-                         force_metadata_refresh=args.force_metadata_refresh)
+                         bins=bins)
     val_gen = data_gen(args.data_dir, args.batch_size,
                          scrambled_range=(0.9, 1.0, seed), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
                          include_motion_data=True,
-                         bins=bins, 
-                         force_metadata_refresh=args.force_metadata_refresh)
+                         bins=bins)
     motion_data_size = (1, 1, 3)
 
     checkpoint = None
@@ -254,12 +282,20 @@ def main(args):
     print("About to train")
     checkpoint_cb = ModelCheckpoint(auto_checkpoint_name, monitor='val_loss', verbose=1, save_best_only=False, mode='min')
     tensorboard_cb = TensorBoard(log_dir='/media/disk1/kuba/tensorboard', histogram_freq=0, write_graph=True, write_images=True)
+
+    class_weights = calc_class_weights(args.data_dir,
+                                       force_metadata_refresh=args.force_metadata_refresh,
+                                       bins=bins)
+    print('Using class weights {}'.format(class_weights))
+    loss_fnctn = weighted_categorical_crossentropy(class_weights)
+
     history = segnet_to_use.fit_generator(train_gen,
                                    steps_per_epoch=args.epoch_steps,
                                    epochs=args.n_epochs,
                                    validation_data=val_gen,
                                    validation_steps=args.val_steps,
-                                   callbacks=[checkpoint_cb, tensorboard_cb])
+                                   callbacks=[checkpoint_cb])
+                                   # callbacks=[checkpoint_cb, tensorboard_cb])
 
     pickle.dump(history.history, open(r'history.pickle', 'wb'))
 

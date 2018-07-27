@@ -51,7 +51,7 @@ def lout(no):
     print('{}\n{}'.format(res,loaded_model.layers[no]))
 
 
-def one_hot_to_img(img, bins):
+def one_hot_to_img(img, bins, img_shape):
     '''
     Convert a one-hot encoded (or softmaxed probabilities) image of binned
     values into grayscale.
@@ -61,7 +61,16 @@ def one_hot_to_img(img, bins):
     for bin_idx, bin_val in enumerate(bins):
         retimg[np.nonzero(bin_idxs==bin_idx)] = bin_val
     retimg *= 255
-    return retimg
+
+    # Finally, unflatten
+
+    if len(retimg.shape) > 1:
+        unflattented = np.empty((retimg.shape[0], img_shape[0], img_shape[1]), dtype=retimg.dtype)
+        for idx in range(retimg.shape[0]):
+            unflattented[idx, ...] = np.reshape(retimg[idx, ...], img_shape)
+    else:
+        unflattented = np.reshape(retimg, img_shape)
+    return unflattented
 
 
 
@@ -69,9 +78,9 @@ def visualize_prediction(datapoint, display=True):
     inputs, ground_truth, rgbs, timestamps = datapoint
     predictions = loaded_model.predict(inputs)
     inputs = inputs[0]
-
-    ground_truth = one_hot_to_img(ground_truth, bins)
-    predictions = one_hot_to_img(predictions, bins)
+    
+    ground_truth = one_hot_to_img(ground_truth, bins, inputs.shape[-3:-1])
+    predictions = one_hot_to_img(predictions, bins, inputs.shape[-3:-1])
 
     predictions = predictions.astype(np.uint8)
     ground_truth = ground_truth.astype(np.uint8)

@@ -51,13 +51,10 @@ def o_f_compensate_for_rotation(opt_flow, rot, focal=cam_f, xy_scaling=xy_scale_
     xs = np.tile(xs, (current_size[0], 1))
     xs *= xy_scaling
 
-    # import pdb; pdb.set_trace()
-
     # In AirSim Coordinates rot[0] is rotation around the central axis (roll)
     # rot[1] is pitch and rot[2] is negative yaw
 
     # First channel is the horizontal motion component
-    # print('{}\t{}\t{}'.format(rot[1], rot[2], rot[0]))
     opt_flow_corrected[..., 0] -= ys * xs * -rot[1]
     opt_flow_corrected[..., 0] -= -(focal * focal + xs * xs) * -rot[2]
     opt_flow_corrected[..., 0] -= ys * focal * rot[0]
@@ -94,7 +91,9 @@ def world2camera_coords(vect, cam_orient):
         ret
     return ret
 
-def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=False):
+def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=False, bins=None):
+    if bins is None:
+        bins = default_bins
     metadata_file = os.path.join(data_dir, 'optical_flow_metadata.pickle')
     if os.path.isfile(metadata_file) and not force_metadata_refresh:
         f = open(metadata_file, 'rb')
@@ -108,6 +107,7 @@ def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=Fals
         metadata['cam_lin_vel'] = []
         metadata['cam_ang_vel'] = []
         metadata['timestamp_idx'] = {}
+        metadata['class_count'] = []
         vel = []
         orient = []
         idx = 0
@@ -122,6 +122,16 @@ def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=Fals
             orient.append(Quaternion(datapoints.loc[timestamp][['OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']]))
             metadata['cam_ang_vel'].append(datapoints.loc[timestamp][['AV_x', 'AV_y', 'AV_z']])
             metadata['timestamp_idx'][timestamp] = idx
+
+            class_count = []
+            for idx, a_bin in enumerate(bins):
+                if idx != len(bins)-1:
+                    upper = bins[idx+1]
+                else:
+                    upper = 1.
+                class_count.append(np.sum(np.logical_and(coll_dist > a_bin, coll_dist < upper)))
+            metadata['class_count'].append(class_count)
+
             idx += 1
 
         # Calculate the velocity w.r.t. camera
@@ -130,10 +140,26 @@ def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=Fals
         metadata['sums'] = np.array(metadata['sums'])
         metadata['max_vals'] = np.array(metadata['max_vals'])
         metadata['cam_ang_vel'] = np.array(metadata['cam_ang_vel'])
+        metadata['class_count'] = np.array(metadata['class_count'])
 
         f = open(metadata_file, 'wb')
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
     return metadata
+
+def calc_class_weights(data_dir, force_metadata_refresh=False, bins=None):
+    datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
+    datapoints_all = pd.read_csv(datapoints_csv_name,
+                             header=None,
+                             sep=',',
+                             names=csv_col_names,
+                             index_col=0)
+    metadata = load_optical_flow_metadata(data_dir, datapoints_all,
+                                              force_metadata_refresh=force_metadata_refresh,
+                                              bins=bins)
+
+    class_totals = np.sum(metadata['class_count'], axis=0)
+    weights = np.sum(class_totals) / (class_totals.shape[0] * class_totals)
+    return weights
 
 def data_gen(data_dir, batch_size, bins=None,
              scrambled_range=None,
@@ -154,7 +180,9 @@ def data_gen(data_dir, batch_size, bins=None,
                              names=csv_col_names,
                              index_col=0)
     if min_sum_percentile or min_max_value or include_motion_data:
-        metadata = load_optical_flow_metadata(data_dir, datapoints_all, force_metadata_refresh)
+        metadata = load_optical_flow_metadata(data_dir, datapoints_all,
+                                              force_metadata_refresh=force_metadata_refresh,
+                                              bins=bins)
     # If needed, take only those datapoints where there is most collision
     # probability
     if min_sum_percentile is not None:
@@ -210,6 +238,7 @@ def data_gen(data_dir, batch_size, bins=None,
                                       'misc_' + str(timestamp) + '.npz')
             coll_dist = np.load(coll_dist_n)['arr_0']
             coll_dist *= coll_dist_mul  # not sure why the max value seems to be bounded at 0.5...
+            coll_dist = coll_dist.flatten()
 
             if include_rgb:
                 rgb_n = os.path.join(data_dir, 'images',
@@ -251,13 +280,12 @@ def bin_pixels(data, bins):
     if bins is None:
         return data
     bin_indices = np.digitize(data, bins) - 1
-    result = np.zeros((data.shape[0], data.shape[1], data.shape[2], len(bins)))
+    result = np.zeros((data.shape[0], data.shape[1], len(bins)))
     
     for bin_idx in range(len(bins)):
         one_hot_indices = np.nonzero(bin_indices==bin_idx)
         one_hot_indices = (one_hot_indices[0],
                            one_hot_indices[1],
-                           one_hot_indices[2],
                            bin_idx * np.ones_like(one_hot_indices[0]))
         result[one_hot_indices] = 1
     # print('r{}'.format(result.shape))
@@ -367,7 +395,6 @@ def find_focal_len(data_dir):
     return res
 
 def avg_horizontal_flow(inp, datapoints):
-    # import pdb; pdb.set_trace()
     corr_opt_flow_cumul = 0
     for i in range(len(datapoints)):
         opt_flow_n = os.path.join(data_dir, 'images',
