@@ -144,7 +144,8 @@ def data_gen(data_dir, batch_size, bins=None,
              include_motion_data=False,
              min_sum_percentile=None,
              min_max_value=None,
-	     force_metadata_refresh=False):
+	         force_metadata_refresh=False,
+             just_report_size=False):
     ''' Generator for data batches from AirSim-generated data. '''
     datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
     datapoints_all = pd.read_csv(datapoints_csv_name,
@@ -181,7 +182,8 @@ def data_gen(data_dir, batch_size, bins=None,
     
         datapoints = datapoints_all.loc[start_timestamp:end_timestamp]
         batch_start = start_idx
-    print('Using dataset with of {} elements'.format(datapoints.shape[0]))
+    if just_report_size:
+        return datapoints.shape[0]
     while True:
         timestamps = []
         inputs = []

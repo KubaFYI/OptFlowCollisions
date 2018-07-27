@@ -18,6 +18,8 @@ from tensorflow.keras.layers import ZeroPadding2D
 from tensorflow.keras.models import Model
 from tensorflow.keras.models import load_model
 from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.utils import multi_gpu_model
+from tensorflow.python.client import device_lib
 
 import tensorflow.keras.backend as K
 
@@ -91,13 +93,13 @@ def CreateSegNet(input_shapes, kernel=3, pool_size=(2, 2), output_mode="softmax"
 
     full_input = Concatenate(axis=-1)([input_optical_flow, pos_vel_pre])
 
-    encoder_decoder_layers = [(2, 32, 5), (3, 64, 5)]
-    enc_dec, masks = SegNetEncoderDecoderGenerator(full_input,
-                                layers=encoder_decoder_layers,
-                                pool_size=(2, 2),
-                                shave_off_decoder_end=1)
+    # encoder_decoder_layers = [(2, 32, 5), (3, 64, 5)]
+    # enc_dec, masks = SegNetEncoderDecoderGenerator(full_input,
+    #                             layers=encoder_decoder_layers,
+    #                             pool_size=(2, 2),
+    #                             shave_off_decoder_end=1)
 
-    conv_26 = Convolution2D(nlabels, (1, 1), padding="same")(enc_dec)
+    conv_26 = Convolution2D(nlabels, (1, 1), padding="same")(full_input)
     outputs = BatchNormalization()(conv_26)
 
     # For some reason the final activation sets all tensor elements to 1.0 -- why??
@@ -164,11 +166,25 @@ def SegNetEncoderDecoderGenerator(inputs, layers, pool_size=(2, 2), shave_off_de
 
     print("Building decoder done..")
 
+def get_available_gpus():
+    local_device_protos = device_lib.list_local_devices()
+    return [x.name for x in local_device_protos if x.device_type == 'GPU']
+
 def main(args):
     auto_checkpoint_name = 'auto-checkpoint'
     end_checkpoint_name = 'end_checkpoint'
     bins = default_bins
     seed = 77
+
+    training_size = data_gen(args.data_dir, args.batch_size,
+                         scrambled_range=(0.0, 0.9, seed), range_in_fractions=True,
+                         img_resolution=args.input_shape, min_max_value=0.1,
+                         include_motion_data=True,
+                         bins=bins,
+                         force_metadata_refresh=args.force_metadata_refresh,
+                         just_report_size=True)
+    print('Training using dataset of size {}'.format(training_size))
+
     train_gen = data_gen(args.data_dir, args.batch_size,
                          scrambled_range=(0.0, 0.9, seed), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
@@ -184,7 +200,7 @@ def main(args):
     motion_data_size = (1, 1, 3)
 
     checkpoint = None
-    if args.continue_training:
+    if args.continue_training and not args.multi_gpu:
         # Load model and weights
         if not os.path.isfile(end_checkpoint_name):
             if os.path.isfile(auto_checkpoint_name):
@@ -209,23 +225,36 @@ def main(args):
                          'MaxUnpooling2D': MaxUnpooling2D,
                          'CombineMotionWithImg': CombineMotionWithImg}
         segnet = load_model(checkpoint, custom_objects=custom_layers, compile=False)
-    
-    segnet.compile(loss=args.loss, optimizer=args.optimizer, metrics=["categorical_crossentropy"])
-    print(segnet.summary())
+
+    gpus = get_available_gpus()
+    if len(gpus) > 1 and args.multi_gpu:
+        gpus_to_use = []
+        print('Available GPUs: {}'.format(gpus))
+        gpu_idxs = input('Give indexes of GPUs you would like to use...')
+        for c in gpu_idxs:
+            gpus_to_use.append(int(c))
+        segnet_to_use = multi_gpu_model(segnet, gpus=2, cpu_relocation=True)
+        segnet_to_use.compile(loss=args.loss, optimizer=args.optimizer, metrics=["categorical_crossentropy"])
+    else:
+        segnet.compile(loss=args.loss, optimizer=args.optimizer, metrics=["categorical_crossentropy"])
+        segnet_to_use = segnet
+    print(segnet_to_use.summary())
 
 
     # Use below to run CPU-only session
     # config = tf.ConfigProto(device_count={'GPU': 0})
+    sess = K.get_session()
+    # config = tf.ConfigProto()  
+    # config.gpu_options.allow_growth = True  
     # sess = tf.Session(config=config)
 
     # Use below to run with the tensorflow debugger
-    sess = K.get_session()
     # sess = tf_debug.LocalCLIDebugWrapperSession(sess)
     # K.set_session(sess)
 
     print("About to train")
     checkpoint_cb = ModelCheckpoint(auto_checkpoint_name, monitor='val_loss', verbose=1, save_best_only=False, mode='min')
-    history = segnet.fit_generator(train_gen,
+    history = segnet_to_use.fit_generator(train_gen,
                                    steps_per_epoch=args.epoch_steps,
                                    epochs=args.n_epochs,
                                    validation_data=val_gen,
@@ -241,6 +270,8 @@ def main(args):
 
 if __name__ == "__main__":
     # command line argments
+    print(get_available_gpus())
+    # sys.exit()
     parser = argparse.ArgumentParser(description="SegNet LIP dataset")
     parser.add_argument("--data_dir",
             default=os.path.join('/mnt', 'data', 'AirSimCollectedData', 'testing'), help="Training / validation / testing data location")
@@ -292,6 +323,12 @@ if __name__ == "__main__":
     parser.add_argument("--force_metadata_refresh",
             action="store_true",
             help="Force updates of dataset metadate upon creation of data generator")
+    parser.add_argument("--multi_gpu",
+            action="store_true",
+            help="Use multiple GPUs for training. BROKEN")
+    parser.add_argument("--gpu_n",
+            default='0',
+            help="Default GPU index to use.")
     args = parser.parse_args()
-
-    main(args)
+    with tf.device('/GPU:{}'.format(args.gpu_n)):
+        main(args)
