@@ -173,12 +173,14 @@ def main(args):
                          scrambled_range=(0.0, 0.9, seed), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
                          include_motion_data=True,
-                         bins=bins)
+                         bins=bins,
+                         force_metadata_refresh=args.force_metadata_refresh)
     val_gen = data_gen(args.data_dir, args.batch_size,
                          scrambled_range=(0.9, 1.0, seed), range_in_fractions=True,
                          img_resolution=args.input_shape, min_max_value=0.1,
                          include_motion_data=True,
-                         bins=bins)
+                         bins=bins, 
+                         force_metadata_refresh=args.force_metadata_refresh)
     motion_data_size = (1, 1, 3)
 
     checkpoint = None
@@ -287,6 +289,9 @@ if __name__ == "__main__":
     parser.add_argument("--continue_training",
             action="store_true",
             help="Load previously done weights?")
+    parser.add_argument("--force_metadata_refresh",
+            action="store_true",
+            help="Force updates of dataset metadate upon creation of data generator")
     args = parser.parse_args()
 
     main(args)

@@ -94,9 +94,9 @@ def world2camera_coords(vect, cam_orient):
         ret
     return ret
 
-def load_optical_flow_metadata(data_dir, datapoints):
+def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=False):
     metadata_file = os.path.join(data_dir, 'optical_flow_metadata.pickle')
-    if os.path.isfile(metadata_file) and False:
+    if os.path.isfile(metadata_file) and not force_metadata_refresh:
         f = open(metadata_file, 'rb')
         metadata = pickle.load(f)
     else:
@@ -143,7 +143,8 @@ def data_gen(data_dir, batch_size, bins=None,
              include_rgb=False,
              include_motion_data=False,
              min_sum_percentile=None,
-             min_max_value=None):
+             min_max_value=None,
+	     force_metadata_refresh=False):
     ''' Generator for data batches from AirSim-generated data. '''
     datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
     datapoints_all = pd.read_csv(datapoints_csv_name,
@@ -152,7 +153,7 @@ def data_gen(data_dir, batch_size, bins=None,
                              names=csv_col_names,
                              index_col=0)
     if min_sum_percentile or min_max_value or include_motion_data:
-        metadata = load_optical_flow_metadata(data_dir, datapoints_all)
+        metadata = load_optical_flow_metadata(data_dir, datapoints_all, force_metadata_refresh)
     # If needed, take only those datapoints where there is most collision
     # probability
     if min_sum_percentile is not None:
