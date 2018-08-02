@@ -93,9 +93,11 @@ class CombineMotionWithImg(Layer):
             width = input_shape_fl[-3]
             height = input_shape_fl[-2]
             xs = tf.range(width, dtype=tf.float32)
-            xs = tf.floor(tf.subtract(xs, width))
+            xs = tf.floor(tf.subtract(xs, tf.divide(width, tf.constant(2, dtype=tf.float32))))
+            xs = tf.divide(xs, width)
             ys = tf.range(height, dtype=tf.float32)
-            ys = tf.floor(tf.subtract(ys, height))
+            ys = tf.floor(tf.subtract(ys, tf.divide(height, tf.constant(2, dtype=tf.float32))))
+            ys = tf.divide(ys, height)
             xs, ys = tf.meshgrid(ys, xs)
             xs = tf.expand_dims(xs, axis=-1)
             ys = tf.expand_dims(ys, axis=-1)

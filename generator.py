@@ -11,13 +11,14 @@ from tqdm import tqdm
 from pyquaternion import Quaternion
 import pickle
 from flowlib import flow_to_image
+import pdb
 # cv2.imshow('qwe', flow_to_image(opt_flow))
 
 default_data_dir = os.path.join('/mnt', 'data', 'AirSimCollectedData', 'testing')
 csv_col_names = ['LV_x', 'LV_y', 'LV_z', 'AV_x', 'AV_y', 'AV_z', 'OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']
 datapoints_csv_name = os.path.join(default_data_dir, 'airsim_rec.csv')
 
-default_bins = [0, 0.1, 0.25, 0.5, 0.75, 0.9]
+default_bins = [0, 0.5]
 
 # For some reason max values for collision distance seem to be bounded at 0.5
 # This multiplier aims to fix that
@@ -30,6 +31,19 @@ cam_f = orig_image_size[1] / 2 / np.tan( FOV / 180 * np.pi / 2 )
 
 cam_f = 4.47189418e+00 # calculated by minimization of horizontal flow in a yaw-only dataset
 xy_scale_default = 4.78224949e-06
+
+# velocity_input_mode = 'raw'
+# velocity_input_mode = 'camera-compensated'
+velocity_input_mode = 'angle-magnitude'
+
+incl_ang_vel = True
+def set_incl_ang_vel(val):
+    global incl_ang_vel
+    incl_ang_vel = val
+
+def get_incl_ang_vel():
+    global incl_ang_vel
+    return incl_ang_vel
 
 def o_f_compensate_for_rotation(opt_flow, rot, focal=cam_f, xy_scaling=xy_scale_default):
     '''
@@ -91,7 +105,14 @@ def world2camera_coords(vect, cam_orient):
         ret
     return ret
 
-def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=False, bins=None):
+def load_optical_flow_metadata(data_dir, datapoints=None, force_metadata_refresh=False, bins=None):
+    if datapoints is None:
+        datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
+        datapoints = pd.read_csv(datapoints_csv_name,
+                             header=None,
+                             sep=',',
+                             names=csv_col_names,
+                             index_col=0)
     if bins is None:
         bins = default_bins
     metadata_file = os.path.join(data_dir, 'optical_flow_metadata.pickle')
@@ -124,9 +145,9 @@ def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=Fals
             metadata['timestamp_idx'][timestamp] = idx
 
             class_count = []
-            for idx, a_bin in enumerate(bins):
-                if idx != len(bins)-1:
-                    upper = bins[idx+1]
+            for bin_idx, a_bin in enumerate(bins):
+                if bin_idx != len(bins)-1:
+                    upper = bins[bin_idx+1]
                 else:
                     upper = 1.
                 class_count.append(np.sum(np.logical_and(coll_dist > a_bin, coll_dist < upper)))
@@ -146,7 +167,8 @@ def load_optical_flow_metadata(data_dir, datapoints, force_metadata_refresh=Fals
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
     return metadata
 
-def calc_class_weights(data_dir, force_metadata_refresh=False, bins=None):
+def calc_class_weights(data_dir, force_metadata_refresh=False, bins=None, min_max_value=0):
+    # pdb.set_trace()
     datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
     datapoints_all = pd.read_csv(datapoints_csv_name,
                              header=None,
@@ -157,21 +179,20 @@ def calc_class_weights(data_dir, force_metadata_refresh=False, bins=None):
                                               force_metadata_refresh=force_metadata_refresh,
                                               bins=bins)
 
-    class_totals = np.sum(metadata['class_count'], axis=0)
+    class_totals = np.sum(metadata['class_count'][np.nonzero(metadata['max_vals'] > min_max_value)], axis=0)
     weights = np.sum(class_totals) / (class_totals.shape[0] * class_totals)
-    return weights
+    # weights = np.power(weights, 1/5)
+    # weights = np.power(weights, 1/5)
+    mismatch_weights = np.sum(weights) / weights
+    return weights, mismatch_weights
 
-def data_gen(data_dir, batch_size, bins=None,
+def generator_size(data_dir, bins=None,
              scrambled_range=None,
              timestamp_range=None, range_in_fractions=False,
-             img_resolution=None,
-             random_order=True,
-             include_rgb=False,
              include_motion_data=False,
              min_sum_percentile=None,
              min_max_value=None,
-	         force_metadata_refresh=False,
-             just_report_size=False):
+             force_metadata_refresh=False):
     ''' Generator for data batches from AirSim-generated data. '''
     datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
     datapoints_all = pd.read_csv(datapoints_csv_name,
@@ -210,8 +231,60 @@ def data_gen(data_dir, batch_size, bins=None,
     
         datapoints = datapoints_all.loc[start_timestamp:end_timestamp]
         batch_start = start_idx
-    if just_report_size:
-        return datapoints.shape[0]
+
+    print('Analytical rotational motion OF compensation is {}'.format('OFF' if incl_ang_vel else 'ON'))
+    return datapoints.shape[0]
+
+
+def data_gen(data_dir, batch_size, bins=None,
+             scrambled_range=None,
+             timestamp_range=None, range_in_fractions=False,
+             img_resolution=None,
+             random_order=True,
+             include_rgb=False,
+             include_motion_data=False,
+             min_sum_percentile=None,
+             min_max_value=None,
+             force_metadata_refresh=False):
+    ''' Generator for data batches from AirSim-generated data. '''
+    datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
+    datapoints_all = pd.read_csv(datapoints_csv_name,
+                             header=None,
+                             sep=',',
+                             names=csv_col_names,
+                             index_col=0)
+    if min_sum_percentile or min_max_value or include_motion_data:
+        metadata = load_optical_flow_metadata(data_dir, datapoints_all,
+                                              force_metadata_refresh=force_metadata_refresh,
+                                              bins=bins)
+    # If needed, take only those datapoints where there is most collision
+    # probability
+    if min_sum_percentile is not None:
+        min_sum = np.percentile(metadata['sums'], min_sum_percentile)
+        datapoints_all = datapoints_all[metadata['sums'] > min_sum]
+    elif min_max_value is not None:
+        datapoints_all = datapoints_all[metadata['max_vals'] > min_max_value]
+
+    if scrambled_range is not None:
+        datapoints = datapoints_all.sample(frac=1., random_state=scrambled_range[2])
+        datapoints = datapoints.iloc[int(scrambled_range[0] * len(datapoints)):int(scrambled_range[1] * len(datapoints))]
+    else:
+        # Figure out first and last timestep of the range
+        if timestamp_range is None:
+            timestamp_range = (datapoints_all.index[0], datapoints_all.index[-1])
+    
+        if range_in_fractions:
+            start_idx = int(np.floor(timestamp_range[0] * datapoints_all.shape[0]))
+            end_idx = int(np.ceil(timestamp_range[1] * datapoints_all.shape[0]))
+            start_timestamp = datapoints_all.index[start_idx]
+            end_timestamp = datapoints_all.index[end_idx-1]
+        else:
+            start_timestamp = timestamp_range[0]
+            end_timestamp = timestamp_range[1]
+    
+        datapoints = datapoints_all.loc[start_timestamp:end_timestamp]
+        batch_start = start_idx
+
     while True:
         timestamps = []
         inputs = []
@@ -248,18 +321,25 @@ def data_gen(data_dir, batch_size, bins=None,
 
             if img_resolution is not None:
                 opt_flow = cv2.resize(opt_flow, (img_resolution[1], img_resolution[0]))
-                opt_flow = o_f_compensate_for_rotation(opt_flow, metadata['cam_ang_vel'][idx])
+                if not incl_ang_vel:
+                    opt_flow = o_f_compensate_for_rotation(opt_flow, metadata['cam_ang_vel'][idx])
                 # print(opt_flow.shape)
             timestamps.append(timestamp)
             inputs.append(opt_flow)
             labels.append(np.expand_dims(coll_dist, axis=-1))
             # print('cd:{}'.format(coll_dist.shape))
             if include_motion_data:
-                vel_inputs.append(metadata['cam_lin_vel'][idx])
+                if not incl_ang_vel:
+                    vel_info = metadata['cam_lin_vel'][idx]
+                else:
+                    vel_info = np.concatenate((metadata['cam_lin_vel'][idx],
+                                               metadata['cam_ang_vel'][idx]),
+                                              axis=-1)
+                vel_inputs.append(vel_info)
         timestamps = np.array(timestamps)
         inputs = np.array(inputs)
         if include_motion_data:
-            vel_inputs = np.array(vel_inputs)
+            vel_inputs = velocity_form(np.array(vel_inputs))
             # Turn motion vectors into motion 1x1 'images' with vector values as 'channels'
             vel_inputs = np.expand_dims(np.expand_dims(vel_inputs, axis=1), axis=1)
             inputs = [inputs, vel_inputs]
@@ -271,6 +351,19 @@ def data_gen(data_dir, batch_size, bins=None,
             yield inputs, bin_pixels(labels, bins)
         else:
             yield inputs, bin_pixels(labels, bins)
+
+def velocity_form(vel_inputs):
+    if vel_inputs.ndim == 1:
+        vel_inputs = np.expand_dims(vel_inputs, axis=0)
+    if velocity_input_mode == 'angle-magnitude':
+        mag = np.linalg.norm(vel_inputs[:, 0:3], axis=-1)
+        comp_hor = vel_inputs[:, 1] / mag
+        comp_ver = vel_inputs[:, 2] / mag
+        vel_inputs[:, 0:3] = np.concatenate((np.expand_dims(mag, axis=-1),
+                                     np.expand_dims(comp_hor, axis=-1),
+                                     np.expand_dims(comp_ver, axis=-1)),
+                                    axis=-1)
+    return vel_inputs
 
 def bin_pixels(data, bins):
     '''
