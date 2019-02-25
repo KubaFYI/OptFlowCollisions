@@ -18,11 +18,11 @@ default_data_dir = os.path.join('/mnt', 'data', 'AirSimCollectedData', 'testing'
 csv_col_names = ['LV_x', 'LV_y', 'LV_z', 'AV_x', 'AV_y', 'AV_z', 'OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']
 datapoints_csv_name = os.path.join(default_data_dir, 'airsim_rec.csv')
 
-default_bins = [0, 0.5]
+default_bins = [0, 0.25]
 
 # For some reason max values for collision distance seem to be bounded at 0.5
 # This multiplier aims to fix that
-coll_dist_mul = 2
+coll_dist_mul = 1
 
 # https://github.com/unrealcv/unrealcv/issues/14
 orig_image_size = (270, 480)    # (h,w)
@@ -44,6 +44,12 @@ def set_incl_ang_vel(val):
 def get_incl_ang_vel():
     global incl_ang_vel
     return incl_ang_vel
+
+def set_correction_stats(vals):
+    global cam_f
+    global xy_scale_default
+    cam_f = val[0]
+    xy_scale_default = val[1]
 
 def o_f_compensate_for_rotation(opt_flow, rot, focal=cam_f, xy_scaling=xy_scale_default):
     '''
@@ -105,7 +111,35 @@ def world2camera_coords(vect, cam_orient):
         ret
     return ret
 
-def load_optical_flow_metadata(data_dir, datapoints=None, force_metadata_refresh=False, bins=None):
+def load_optical_flow_metadata(data_dirs, force_metadata_refresh=False, bins=None):
+    metadatas = {}
+    metadatas['sums'] = np.empty((0,), dtype=np.float32)
+    metadatas['max_vals'] = np.empty((0,), dtype=np.float32)
+    metadatas['mean_vals'] = np.empty((0,), dtype=np.float32)
+    metadatas['cam_lin_vel'] = np.empty((0, 3), dtype=np.float32)
+    metadatas['cam_ang_vel'] = np.empty((0, 3), dtype=np.float32)
+    metadatas['class_count'] = np.empty((0, len(bins)), dtype=np.float32)
+    metadatas['timestamp_idx'] = {}
+    idxs_all = 0
+    for dir_idx, data_dir in enumerate(data_dirs):
+        metadata = load_optical_flow_metadata_single_dir(data_dir[0],
+                                                         force_metadata_refresh=force_metadata_refresh,
+                                                         bins=bins,
+                                                         dir_idx=dir_idx)
+        metadatas['sums'] = np.concatenate([metadatas['sums'], metadata['sums']], axis=0)
+        metadatas['max_vals'] = np.concatenate([metadatas['max_vals'], metadata['max_vals']], axis=0)
+        metadatas['mean_vals'] = np.concatenate([metadatas['mean_vals'], metadata['mean_vals']], axis=0)
+        metadatas['cam_lin_vel'] = np.concatenate([metadatas['cam_lin_vel'], metadata['cam_lin_vel']], axis=0)
+        metadatas['cam_ang_vel'] = np.concatenate([metadatas['cam_ang_vel'], metadata['cam_ang_vel']], axis=0)
+        metadatas['class_count'] = np.concatenate([metadatas['class_count'], metadata['class_count']], axis=0)
+
+        idxs_all += len(metadatas['timestamp_idx'])
+
+        for timestamp, idx in metadata['timestamp_idx'].items():
+            metadatas['timestamp_idx'][timestamp] = (idx[0]+idxs_all, idx[1])
+    return metadatas
+
+def load_optical_flow_metadata_single_dir(data_dir, datapoints=None, force_metadata_refresh=False, bins=None, dir_idx=None):
     if datapoints is None:
         datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
         datapoints = pd.read_csv(datapoints_csv_name,
@@ -125,6 +159,7 @@ def load_optical_flow_metadata(data_dir, datapoints=None, force_metadata_refresh
         metadata = {}
         metadata['sums'] = []
         metadata['max_vals'] = []
+        metadata['mean_vals'] = []
         metadata['cam_lin_vel'] = []
         metadata['cam_ang_vel'] = []
         metadata['timestamp_idx'] = {}
@@ -140,17 +175,21 @@ def load_optical_flow_metadata(data_dir, datapoints=None, force_metadata_refresh
             coll_dist *= coll_dist_mul  # not sure why the max value seems to be bounded at 0.5...
             metadata['sums'].append(np.sum(coll_dist))
             metadata['max_vals'].append(np.max(coll_dist))
+            metadata['mean_vals'].append(np.mean(coll_dist))
             orient.append(Quaternion(datapoints.loc[timestamp][['OQ_w', 'OQ_x', 'OQ_y', 'OQ_z']]))
             metadata['cam_ang_vel'].append(datapoints.loc[timestamp][['AV_x', 'AV_y', 'AV_z']])
-            metadata['timestamp_idx'][timestamp] = idx
+            if dir_idx is not None:
+                metadata['timestamp_idx'][timestamp] = (idx, dir_idx)
+            else:
+                metadata['timestamp_idx'][timestamp] = idx
 
             class_count = []
             for bin_idx, a_bin in enumerate(bins):
                 if bin_idx != len(bins)-1:
                     upper = bins[bin_idx+1]
                 else:
-                    upper = 1.
-                class_count.append(np.sum(np.logical_and(coll_dist > a_bin, coll_dist < upper)))
+                    upper = 1.1
+                class_count.append(np.sum(np.logical_and(coll_dist >= a_bin, coll_dist < upper)))
             metadata['class_count'].append(class_count)
 
             idx += 1
@@ -160,6 +199,7 @@ def load_optical_flow_metadata(data_dir, datapoints=None, force_metadata_refresh
         metadata['cam_lin_vel'] = world2camera_coords(vel, orient)
         metadata['sums'] = np.array(metadata['sums'])
         metadata['max_vals'] = np.array(metadata['max_vals'])
+        metadata['mean_vals'] = np.array(metadata['mean_vals'])
         metadata['cam_ang_vel'] = np.array(metadata['cam_ang_vel'])
         metadata['class_count'] = np.array(metadata['class_count'])
 
@@ -167,17 +207,10 @@ def load_optical_flow_metadata(data_dir, datapoints=None, force_metadata_refresh
         pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
     return metadata
 
-def calc_class_weights(data_dir, force_metadata_refresh=False, bins=None, min_max_value=0):
-    # pdb.set_trace()
-    datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
-    datapoints_all = pd.read_csv(datapoints_csv_name,
-                             header=None,
-                             sep=',',
-                             names=csv_col_names,
-                             index_col=0)
-    metadata = load_optical_flow_metadata(data_dir, datapoints_all,
-                                              force_metadata_refresh=force_metadata_refresh,
-                                              bins=bins)
+def calc_class_weights(data_dirs, force_metadata_refresh=False, bins=None, min_max_value=0):
+    metadata = load_optical_flow_metadata(data_dirs,
+                                          force_metadata_refresh=force_metadata_refresh,
+                                          bins=bins)
 
     class_totals = np.sum(metadata['class_count'][np.nonzero(metadata['max_vals'] > min_max_value)], axis=0)
     weights = np.sum(class_totals) / (class_totals.shape[0] * class_totals)
@@ -186,7 +219,7 @@ def calc_class_weights(data_dir, force_metadata_refresh=False, bins=None, min_ma
     mismatch_weights = np.sum(weights) / weights
     return weights, mismatch_weights
 
-def generator_size(data_dir, bins=None,
+def generator_size(data_dirs, bins=None,
              scrambled_range=None,
              timestamp_range=None, range_in_fractions=False,
              include_motion_data=False,
@@ -194,14 +227,19 @@ def generator_size(data_dir, bins=None,
              min_max_value=None,
              force_metadata_refresh=False):
     ''' Generator for data batches from AirSim-generated data. '''
-    datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
-    datapoints_all = pd.read_csv(datapoints_csv_name,
-                             header=None,
-                             sep=',',
-                             names=csv_col_names,
-                             index_col=0)
+    datapoints_all = pd.DataFrame()
+    for data_dir in data_dirs:
+        if os.path.isdir(data_dir[0]):
+            datapoints_csv_name = os.path.join(data_dir[0], 'airsim_rec.csv')
+            datapoints_one_dir = pd.read_csv(datapoints_csv_name,
+                                             header=None,
+                                             sep=',',
+                                             names=csv_col_names,
+                                             index_col=0)
+            datapoints_all = datapoints_all.append(datapoints_one_dir)
+
     if min_sum_percentile or min_max_value or include_motion_data:
-        metadata = load_optical_flow_metadata(data_dir, datapoints_all,
+        metadata = load_optical_flow_metadata(data_dirs,
                                               force_metadata_refresh=force_metadata_refresh,
                                               bins=bins)
     # If needed, take only those datapoints where there is most collision
@@ -236,7 +274,7 @@ def generator_size(data_dir, bins=None,
     return datapoints.shape[0]
 
 
-def data_gen(data_dir, batch_size, bins=None,
+def data_gen(data_dirs, batch_size, bins=None,
              scrambled_range=None,
              timestamp_range=None, range_in_fractions=False,
              img_resolution=None,
@@ -247,14 +285,19 @@ def data_gen(data_dir, batch_size, bins=None,
              min_max_value=None,
              force_metadata_refresh=False):
     ''' Generator for data batches from AirSim-generated data. '''
-    datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
-    datapoints_all = pd.read_csv(datapoints_csv_name,
-                             header=None,
-                             sep=',',
-                             names=csv_col_names,
-                             index_col=0)
+    datapoints_all = pd.DataFrame()
+    for data_dir in data_dirs:
+        if os.path.isdir(data_dir[0]):
+            datapoints_csv_name = os.path.join(data_dir[0], 'airsim_rec.csv')
+            datapoints_one_dir = pd.read_csv(datapoints_csv_name,
+                                             header=None,
+                                             sep=',',
+                                             names=csv_col_names,
+                                             index_col=0)
+            datapoints_all = datapoints_all.append(datapoints_one_dir)
+
     if min_sum_percentile or min_max_value or include_motion_data:
-        metadata = load_optical_flow_metadata(data_dir, datapoints_all,
+        metadata = load_optical_flow_metadata(data_dirs,
                                               force_metadata_refresh=force_metadata_refresh,
                                               bins=bins)
     # If needed, take only those datapoints where there is most collision
@@ -300,21 +343,21 @@ def data_gen(data_dir, batch_size, bins=None,
             if batch_start >= end_idx:
                 batch_start = start_idx + batch_start % end_idx
         for timestamp in ix:
-            idx = metadata['timestamp_idx'][timestamp]
+            idx, dir_idx = metadata['timestamp_idx'][timestamp]
             # Get the optical flow input
-            opt_flow_n = os.path.join(data_dir, 'images',
+            opt_flow_n = os.path.join(data_dirs[dir_idx][0], 'images',
                                       'flow_' + str(timestamp) + '.npz')
             opt_flow = np.load(opt_flow_n)['opt_flow']
 
             # Get the 'collision distance' labels
-            coll_dist_n = os.path.join(data_dir, 'images',
+            coll_dist_n = os.path.join(data_dirs[dir_idx][0], 'images',
                                       'misc_' + str(timestamp) + '.npz')
             coll_dist = np.load(coll_dist_n)['arr_0']
             coll_dist *= coll_dist_mul  # not sure why the max value seems to be bounded at 0.5...
             coll_dist = coll_dist.flatten()
 
             if include_rgb:
-                rgb_n = os.path.join(data_dir, 'images',
+                rgb_n = os.path.join(data_dirs[dir_idx][0], 'images',
                                      'rgb_' + str(timestamp) + '.png')
                 rgb = cv2.imread(rgb_n)
                 rgbs.append(rgb)
@@ -462,8 +505,8 @@ def data_stats(data_dir, bins, number_for_analysis=None):
     # plt.hist(sums, bins=40)
     # plt.show()
 
-def find_focal_len(data_dir):
-    np.random.seed(77)
+def find_focal_len(data_dir, horver=0):
+    np.random.seed(777)
     starting_estimate = [100, 100]
     number_for_analysis = 100
     datapoints_csv_name = os.path.join(data_dir, 'airsim_rec.csv')
@@ -475,7 +518,7 @@ def find_focal_len(data_dir):
     ix = np.random.choice(np.arange(len(datapoints)), number_for_analysis)
 
     x0 = [starting_estimate]
-    minim_args = (datapoints.iloc[ix],)
+    minim_args = (datapoints.iloc[ix],horver)
     optimize = True
     res = None
     if optimize:
@@ -487,7 +530,7 @@ def find_focal_len(data_dir):
             print('F={} --> mean_OF:{}'.format(val, avg_horizontal_flow(val, datapoints.iloc[ix])))
     return res
 
-def avg_horizontal_flow(inp, datapoints):
+def avg_horizontal_flow(inp, datapoints, horver=0):
     corr_opt_flow_cumul = 0
     for i in range(len(datapoints)):
         opt_flow_n = os.path.join(data_dir, 'images',
@@ -497,12 +540,20 @@ def avg_horizontal_flow(inp, datapoints):
 
         corr_opt_flow_cumul += np.mean(np.abs(o_f_compensate_for_rotation(opt_flow,
                                                 datapoints.iloc[i][['AV_x', 'AV_y', 'AV_z']],
-                                                focal=inp[0], xy_scaling=inp[1])[...,0]))
+                                                focal=inp[0], xy_scaling=inp[1])[...,horver]))
 
     corr_opt_flow_cumul /= len(datapoints)
     return corr_opt_flow_cumul
 
 if __name__ == '__main__':
+    # data_dirs = [[os.path.join('/mnt', 'data', 'AirSimCollectedData', '18-08-07_10-37-26')],
+    #              [os.path.join('/mnt', 'data', 'AirSimCollectedData', '18-07-23_21-21-59')]]
     data_dir = os.path.join('/mnt', 'data', 'AirSimCollectedData', '18-07-23_23-05-47')
-    res = find_focal_len(data_dir)
-    print(res)
+    # with open('metadata_results.pickle', 'wb') as f:
+    #     mdata = load_optical_flow_metadata(data_dirs, force_metadata_refresh=True, bins=default_bins)
+    #     pickle.dump(mdata, f)
+    res = find_focal_len(data_dir, 0)
+    print('0: {}'.format(res))
+    # res = find_focal_len(data_dir, 1)
+    # print('1: {}'.format(res))
+

@@ -13,7 +13,8 @@ import pdb
 
 parser = argparse.ArgumentParser(description="SegNet LIP dataset")
 parser.add_argument("--data_dir",
-        default=os.path.join('/mnt', 'data', 'AirSimCollectedData', 'testing'), help="Training / validation / testing data location")
+        action='append',nargs=1,
+        help="Training / validation / testing data location")
 parser.add_argument("--batch_size",
         default=10,
         type=int,
@@ -430,7 +431,6 @@ def weighted_categorical_crossentropy(match_weights, mismatch_weights=None):
         # clip to prevent NaN's and Inf's
         y_pred = tf.clip_by_value(y_pred, K.epsilon(), 1 - K.epsilon())
         # calc
-        # pdb.set_trace()
         loss = y_true * tf.log(y_pred) * match_weights
         # y_true_opposite = tf.floormod(tf.add(y_true, tf.constant(1.)), tf.constant(2.))
         # loss += - y_true_opposite * tf.log(y_pred) * mismatch_weights
@@ -588,7 +588,7 @@ def main(args):
 
     print("About to train")
     train_callbacks = []
-    train_callbacks.append(ModelCheckpoint(auto_checkpoint_name + '{epoch}', monitor='val_loss', verbose=1, save_best_only=False, mode='min', period=10))
+    train_callbacks.append(ModelCheckpoint(auto_checkpoint_name + '{epoch}', monitor='val_loss', verbose=1, save_best_only=False, mode='min', period=100))
     if os.environ['USER'] == 'kuba':
         # Working on group server
         tensorboard_log_dir_base = '/media/disk1/kuba/tensorboard'
@@ -621,7 +621,6 @@ def main(args):
         train_callbacks.append(TensorBoard(log_dir=tensorboard_log_dir, histogram_freq=0, write_graph=True, write_images=True))
 
     val_dataset = next(val_gen)
-
     history = segnet_to_use.fit_generator(train_gen,
                                    steps_per_epoch=epoch_steps,
                                    epochs=args.n_epochs,
@@ -640,5 +639,6 @@ def main(args):
 if __name__ == "__main__":
     # command line argments
     print(get_available_gpus())
+    print(args.data_dir)
     with tf.device('/GPU:0'.format(args.gpu_n)):
         main(args)

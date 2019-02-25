@@ -34,40 +34,40 @@ train_gen = generator.data_gen(data_dir, batch_size,
                      include_motion_data=True, bins=bins, min_max_value=0.6)
 
 sess = K.get_session()
-class_weights, mismatch_weights = generator.calc_class_weights(data_dir,
-                                    force_metadata_refresh=False,
-                                    bins=bins)
+# class_weights, mismatch_weights = generator.calc_class_weights(data_dir,
+#                                     force_metadata_refresh=False,
+#                                     bins=bins)
 
-print('Using class weights {}\nAnd mismatch weights {}'.format(class_weights, mismatch_weights))
-loss_fnctn = weighted_categorical_crossentropy(class_weights, mismatch_weights)
-custom_layers = {'MaxPoolingWithArgmax2D': MaxPoolingWithArgmax2D,
-                 'MaxUnpooling2D': MaxUnpooling2D,
-                 'CombineMotionWithImg': CombineMotionWithImg,
-                 'loss': loss_fnctn,
-                 'softmax_last_axis': softmax_last_axis,
-                 'focal_loss': weighted_focal_loss(class_weights)}
+# print('Using class weights {}\nAnd mismatch weights {}'.format(class_weights, mismatch_weights))
+# loss_fnctn = weighted_categorical_crossentropy(class_weights, mismatch_weights)
+# custom_layers = {'MaxPoolingWithArgmax2D': MaxPoolingWithArgmax2D,
+#                  'MaxUnpooling2D': MaxUnpooling2D,
+#                  'CombineMotionWithImg': CombineMotionWithImg,
+#                  'loss': loss_fnctn,
+#                  'softmax_last_axis': softmax_last_axis,
+#                  'focal_loss': weighted_focal_loss(class_weights)}
 
-if args.name is not None:
-    auto_checkpoint_name = args.name
-else: 
-    auto_checkpoint_name = 'auto-checkpoint'
-end_checkpoint_name = 'end-checkpoint'
-model, loaded_model = CreateSegNet([(144, 256, 2), (1, 1, 3)], nlabels=len(bins))
+# if args.name is not None:
+#     auto_checkpoint_name = args.name
+# else: 
+#     auto_checkpoint_name = 'auto-checkpoint'
+# end_checkpoint_name = 'end-checkpoint'
+# model, loaded_model = CreateSegNet([(144, 256, 2), (1, 1, 3)], nlabels=len(bins))
 
 
-if os.stat(end_checkpoint_name).st_mtime >= os.stat(auto_checkpoint_name).st_mtime:
-    print('Loading {}'.format(end_checkpoint_name))
-    loaded_model.load_weights(os.path.join(os.getcwd(), 'end-checkpoint_weights.h5'))
-    # loaded_model = load_model(end_checkpoint_name, custom_objects=custom_layers)
-else:
-    print('Loading {}'.format(auto_checkpoint_name))
-    loaded_model = model
-    loaded_model = load_model(auto_checkpoint_name, custom_objects=custom_layers)
+# if os.stat(end_checkpoint_name).st_mtime >= os.stat(auto_checkpoint_name).st_mtime:
+#     print('Loading {}'.format(end_checkpoint_name))
+#     loaded_model.load_weights(os.path.join(os.getcwd(), 'end-checkpoint_weights.h5'))
+#     # loaded_model = load_model(end_checkpoint_name, custom_objects=custom_layers)
+# else:
+#     print('Loading {}'.format(auto_checkpoint_name))
+#     loaded_model = model
+#     loaded_model = load_model(auto_checkpoint_name, custom_objects=custom_layers)
 
-print(loaded_model.summary())
+# print(loaded_model.summary())
 
-input_data = next(train_gen)
-pred = loaded_model.predict(input_data[0])
+# input_data = next(train_gen)
+# pred = loaded_model.predict(input_data[0])
 
 def lout(no):
     res = sess.run([loaded_model.layers[no].output], feed_dict={'input_1:0':input_data[0]})
@@ -82,7 +82,7 @@ def one_hot_to_img(img, bins, img_shape):
     bin_idxs = np.argmax(img, axis=-1)
     retimg = np.zeros_like(bin_idxs, dtype=img.dtype)
     for bin_idx, bin_val in enumerate(bins):
-        retimg[np.nonzero(bin_idxs==bin_idx)] = bin_val
+        retimg[np.nonzero(bin_idxs==bin_idx)] = bin_val * 3
     retimg *= 255
 
     # Finally, unflatten
